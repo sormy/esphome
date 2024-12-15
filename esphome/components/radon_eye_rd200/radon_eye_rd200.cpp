@@ -67,24 +67,41 @@ void RadonEyeRD200::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
       auto *write_chr = this->parent()->get_characteristic(service_uuid_, sensors_write_characteristic_uuid_);
       if (write_chr == nullptr) {
         ESP_LOGW(TAG, "No sensor write characteristic found at service %s char %s", service_uuid_.to_string().c_str(),
-                 sensors_read_characteristic_uuid_.to_string().c_str());
+                 sensors_write_characteristic_uuid_.to_string().c_str());
         break;
       }
       this->write_handle_ = write_chr->handle;
 
-      this->node_state = esp32_ble_tracker::ClientState::ESTABLISHED;
+      esp_err_t status = esp_ble_gattc_register_for_notify(gattc_if, this->parent()->get_remote_bda(),
+                                                           this->read_handle_);
+      if (status) {
+        ESP_LOGW(TAG, "Error registering for sensor notify, status=%d", status);
+      }
+      break;
+    }
 
-      request_read_values_();
-
-      write_query_message_();
-
+    case ESP_GATTC_WRITE_DESCR_EVT: {
+      if (param->write.status != ESP_GATT_OK) {
+        ESP_LOGE(TAG, "write descr failed, error status = %x", param->write.status);
+        break;
+      }
+      ESP_LOGI(TAG, "write descr success");
+      ESP_LOGI(TAG, "writing 0x%02x at write_handle=%d", write_command_, this->write_handle_);
+      esp_err_t status = esp_ble_gattc_write_char(gattc_if, this->parent()->get_conn_id(),
+                                                  this->write_handle_,
+                                                  sizeof(write_command_),
+                                                  (uint8_t *) &write_command_,
+                                                  ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
       break;
     }
 
     case ESP_GATTC_NOTIFY_EVT: {
-      if (param->read.handle == this->read_handle_) {
-        read_sensors_(param->read.value, param->read.value_len);
+      if (param->notify.is_notify) {
+        ESP_LOGI(TAG, "ESP_GATTC_NOTIFY_EVT, receive notify value, %d bytes", param->notify.value_len);
+      } else {
+        ESP_LOGI(TAG, "ESP_GATTC_NOTIFY_EVT, receive indicate value, %d bytes", param->notify.value_len);
       }
+      read_sensors_(param->notify.value, param->notify.value_len);
       break;
     }
 
@@ -110,7 +127,7 @@ void RadonEyeRD200::read_sensors_(uint8_t *value, uint16_t value_len) {
   // 501085EBB9400000000000000000220025000000
   // Example data V2:
   // 4042323230313033525532303338330652443230304e56322e302e3200014a00060a00080000000300010079300000e01108001c00020000003822005c8f423fa4709d3f
-  ESP_LOGV(TAG, "radon sensors raw bytes");
+  ESP_LOGI(TAG, "radon sensors raw bytes");
   ESP_LOG_BUFFER_HEX_LEVEL(TAG, value, value_len, ESP_LOG_VERBOSE);
 
   // Convert from pCi/L to Bq/m³
@@ -132,17 +149,14 @@ void RadonEyeRD200::read_sensors_(uint8_t *value, uint16_t value_len) {
     return;
   }
 
-  if (is_valid_radon_value_(radon_now)) {
-    radon_sensor_->publish_state(radon_now);
-  }
+  ESP_LOGV(TAG, "Radon now");
+  radon_sensor_->publish_state(radon_now);
 
-  if (is_valid_radon_value_(radon_month)) {
-    ESP_LOGV(TAG, "Radon Long Term based on month");
-    radon_long_term_sensor_->publish_state(radon_month);
-  } else if (is_valid_radon_value_(radon_day)) {
-    ESP_LOGV(TAG, "Radon Long Term based on day");
-    radon_long_term_sensor_->publish_state(radon_day);
-  }
+  ESP_LOGV(TAG, "Radon Long Term based on month");
+  radon_long_term_sensor_->publish_state(radon_month);
+
+  //ESP_LOGV(TAG, "Radon Long Term based on day");
+  //radon_long_term_sensor_->publish_state(radon_day);
 
   ESP_LOGV(TAG, "  Measurements (Bq/m³) now: %0.03f, day: %0.03f, month: %0.03f", radon_now, radon_day, radon_month);
 
@@ -155,35 +169,15 @@ void RadonEyeRD200::read_sensors_(uint8_t *value, uint16_t value_len) {
   parent()->set_enabled(false);
 }
 
-bool RadonEyeRD200::is_valid_radon_value_(float radon) { return radon >= 0.0 and radon < 37000; }
 
 void RadonEyeRD200::update() {
   if (this->node_state != esp32_ble_tracker::ClientState::ESTABLISHED) {
     if (!parent()->enabled) {
       ESP_LOGW(TAG, "Reconnecting to device");
       parent()->set_enabled(true);
-      parent()->connect();
     } else {
       ESP_LOGW(TAG, "Connection in progress");
     }
-  }
-}
-
-void RadonEyeRD200::write_query_message_() {
-  ESP_LOGV(TAG, "writing 0x%02x to write service", write_command_);
-  auto status = esp_ble_gattc_write_char_descr(this->parent()->get_gattc_if(), this->parent()->get_conn_id(),
-                                               this->write_handle_, sizeof(write_command_), (uint8_t *) &write_command_,
-                                               ESP_GATT_WRITE_TYPE_NO_RSP, ESP_GATT_AUTH_REQ_NONE);
-  if (status) {
-    ESP_LOGW(TAG, "Error sending write request for sensor, status=%d", status);
-  }
-}
-
-void RadonEyeRD200::request_read_values_() {
-  auto status = esp_ble_gattc_register_for_notify(this->parent()->get_gattc_if(), this->parent()->get_remote_bda(),
-                                                  this->read_handle_);
-  if (status) {
-    ESP_LOGW(TAG, "Error registering for sensor notify, status=%d", status);
   }
 }
 
